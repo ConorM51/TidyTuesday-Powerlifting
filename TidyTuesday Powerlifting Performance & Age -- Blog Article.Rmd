@@ -1,0 +1,284 @@
+---
+title: "TidyTuesday -- Powerlifting Performance & Age"
+author: "Patrick Ward"
+date: "1/14/2020"
+output: html_document
+---
+---
+title: "Powerlifting Tidy Tuesday"
+author: "Patrick Ward"
+date: "1/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(scales)
+
+theme_set(theme_bw())
+```
+
+# Load data
+
+```{r}
+df <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2019/2019-10-08/ipf_lifts.csv") %>%
+  filter(age_class != "5-12", !is.na(age))
+
+df %>% head(10) %>% View()
+
+# how many rows of data
+nrow(df)
+
+# how many unique athletes
+nrow(distinct(df, name))
+```
+
+# Data Clean Up
+
+```{r}
+# Some of the values for the lifts are negative, which is impossible. Turn those into 0's
+
+df <- df %>%
+  mutate(best3squat_kg = ifelse(best3squat_kg < 0, 0, best3squat_kg),
+        best3bench_kg = ifelse(best3bench_kg < 0, 0, best3bench_kg),
+        best3deadlift_kg = ifelse(best3deadlift_kg < 0, 0, best3deadlift_kg))
+
+# order the data by lifter and date and create a total of their weight lifting in a meet
+
+df <- df %>%
+  mutate(Total = best3squat_kg + best3bench_kg + best3deadlift_kg) %>%
+  arrange(name, date)
+
+# create a long format of the data for plotting purposes
+
+df_long <- df %>%
+  reshape2::melt(., id = c("name", "date", "age", "age_class", "weight_class_kg", "sex"), measure.vars = c("best3squat_kg", "best3bench_kg", "best3deadlift_kg", "Total")) %>%
+  na.omit(df_long)
+
+```
+
+# Data Exploration
+
+```{r}
+# how many competitions have athletes competed in?
+df %>%
+  count(name, sort = T) %>%
+  head(5) %>%
+  mutate(name = fct_reorder(name, n)) %>%
+  ggplot(aes(x = name, y = n)) +
+  geom_col(aes(fill = n)) +
+  coord_flip() +
+  scale_fill_gradientn(colors = rainbow(2))
+
+# Most common type of equipment
+df %>%
+  count(equipment, sort = T) %>%
+  mutate(equipment = fct_reorder(equipment, n)) %>%
+  ggplot(aes(x = equipment, y = n)) +
+  geom_col() +
+  coord_flip()
+
+## what age does the best lift happen at?
+# Age Class
+df_long %>%
+  ggplot(aes(x = age_class, y = value)) +
+  geom_boxplot() +
+  facet_wrap(~variable, scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+# Age (numeric)
+df_long %>%
+  ggplot(aes(x = age, y = value)) +
+  geom_point(color = "grey", alpha = 0.7) +
+  geom_smooth(se = F) +
+  facet_wrap(~variable, scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+# Age (numeric) by sex
+df_long %>%
+  ggplot(aes(x = age, y = value)) +
+  geom_point(color = "grey", alpha = 0.7) +
+  geom_smooth(se = F) +
+  facet_wrap(sex~variable, scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+# Distribution of Totals
+df %>%
+  ggplot(aes(x = Total)) +
+  geom_density(aes(fill = sex), alpha = 0.3) +
+  labs(title = "Distribution of Powerlifting Totals")
+
+
+```
+
+
+# Research questions
+
+- We see some evidence that the athlete's peak around their early 30's
+- Can we build a statistical model to evaluate the observed aging curve in powerlifters?
+- Using a "time to event" analysis, can we identify how many competitions a lifter competes in until achiving an elite Total (the event of interest)?
+
+# Data Clean Up Part 2
+
+- Get only single-ply lifters
+- Filter out only those athletes who have competed in 10 or more competitions
+
+
+```{r}
+sply <- df %>%
+  filter(equipment == "Single-ply") %>%
+  group_by(name) %>%
+  filter(n() >= 10)
+
+nrow(sply)
+nrow(distinct(sply, name))
+
+# 6169
+# 426 athletes
+```
+
+
+# Models
+
+##### Powerlifter Aging Curve
+
+- NOTE: I did not account for sex in the analysis, just to keep things simple.
+- This model can be extended to a mixed model in the future.
+
+```{r}
+
+## create a peak age function, that can calculate the peak agre from the coefficients of the polynmial model
+
+peak_age <- function(coef1, coef2){
+  x = -(coef1) / (2 * (coef2))
+  return(x)
+}
+
+## Build a polynomial model for each lift
+squat_age_fit <- lm(best3squat_kg ~ age + I(age^2), data = sply)
+bench_age_fit <- lm(best3bench_kg ~ age + I(age^2), data = sply)
+deadlift_age_fit <- lm(best3deadlift_kg ~ age + I(age^2), data = sply)
+
+## Get model summaries
+summary(squat_age_fit)
+summary(bench_age_fit)
+summary(deadlift_age_fit)
+
+## Calculate peak ages with the peak_age() function
+sq_peak_age <- peak_age(coef1 = squat_age_fit$coef[2], coef2 = squat_age_fit$coef[3])
+bench_peak_age <- peak_age(coef1 = bench_age_fit$coef[2], coef2 = bench_age_fit$coef[3])
+deadlift_peak_age <- peak_age(coef1 = deadlift_age_fit$coef[2], coef2 = deadlift_age_fit$coef[3])
+
+sq_peak_age
+bench_peak_age
+deadlift_peak_age
+
+## Plot an example of the bench model
+
+age = seq(
+  from = range(sply$age)[1],
+  to = range(sply$age)[2],
+  by = 1)
+
+pred <- predict(bench_age_fit, newdata = data.frame(age))
+CL_95 <- 1.96 * predict(bench_age_fit, newdata = data.frame(age), se = T)$se.fit
+
+df_pred <- data.frame(age, pred, CL_95)
+
+df_pred %>%
+  ggplot(aes(x = age, y = pred)) +
+  geom_point(aes(x = age, y = best3bench_kg), data = sply, color = "grey", alpha = 0.2) +
+  geom_ribbon(aes(ymin = pred - CL_95, ymax = pred + CL_95),
+              fill = "green", alpha = 0.5) +
+  geom_line(color = "red", size = 1.2) +
+  annotate("text", x = 35.5, y = 172.25507, label = "X", size = 12) +
+  labs(x = "age", y = "bench press", title = "Model Predicted Bench Press Line vs Actual Outcomes (dots)")
+
+```
+
+
+##### Time to elite status
+
+- Create a classification for elite
+
+https://www.lift.net/2013/05/09/classification-standards-for-raw-elite-uspa/
+
+```{r}
+
+df_elite <- df %>%
+  filter(sex == "M") %>%
+  mutate(elite_total = 
+    ifelse(weight_class_kg == "52", 475,
+    ifelse(weight_class_kg == "56", 515,
+    ifelse(weight_class_kg == "60", 555,
+    ifelse(weight_class_kg == "67.5", 622,
+    ifelse(weight_class_kg == "74" | weight_class_kg == "75", 681,
+    ifelse(weight_class_kg == "82.5", 732,
+    ifelse(weight_class_kg == "90" | weight_class_kg == "93", 772,
+    ifelse(weight_class_kg == "100", 814,
+    ifelse(weight_class_kg == "110" | weight_class_kg == "105", 843,
+    ifelse(weight_class_kg == "125" | weight_class_kg == "120", 868,
+    ifelse(weight_class_kg == "125+", 907, NA))))))))))))
+
+
+# remove NA is elite_total column
+
+df_elite <- df_elite %>% filter(!is.na(elite_total))
+
+# Create an "is_elite" tag
+
+df_elite <- df_elite %>%
+  mutate(is_elite = ifelse(Total >= elite_total, 1, 0)) %>%
+  arrange(name, date)
+
+## Create a comp_id column to count each competition the lifter was in
+
+df_elite <- df_elite %>%
+  group_by(name) %>%
+  mutate(comp_id = seq_along(name))
+
+## create a data set that has whether the first time the lifter achieved an elite total or the total number of competitions the athlete has been in without achieving an elite total
+
+df_elite2 <- df_elite %>%
+  group_by(name) %>%
+  filter(cumsum(is_elite) == 0 | (cumsum(is_elite) == 1 & is_elite == 1)) %>%
+  filter(comp_id == max(comp_id)) %>%
+  select(name, age, age_class, Total, elite_total, comp_id, is_elite)
+
+nrow(distinct(df_elite2, name))
+
+# 6074 unique lifters
+
+table(df_elite2$is_elite)
+prop.table(table(df_elite2$is_elite))
+barplot(table(df_elite2$is_elite), main = "Number of Male Lifters Totaling Elite\n(0 = Non-Elite Total / 1 = Elite Total)")
+
+df_elite2 %>%
+  ggplot(aes(x = comp_id, y = is_elite)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Competition Number",
+       y = "Lifters Totaling Elite",
+       title = "Number of Competitions until a Lifter Totals Elite")
+
+## Time-to-event model
+
+library(survival)
+library(broom)
+
+model_total <- survfit((Surv(comp_id, is_elite) ~ 1), data = df_elite2)
+
+summary(model_total)
+
+tidy(model_total) %>%
+  ggplot(aes(x = time, y = estimate)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = .2) +
+  scale_y_continuous(labels = percent_format()) +
+  expand_limits(y = .10) +
+  ggtitle("Time to Elite Total")
+
+```
+
+
